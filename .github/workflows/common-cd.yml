@@ -1,0 +1,87 @@
+name: Common_CD
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      ci-workflow-name:
+        required: true
+        type: string
+        description: "Must match the 'name:' field of the triggering CI workflow"
+
+    secrets:
+      APP_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+      MANIFEST_REPO:
+        required: true
+
+jobs:
+  update-manifest:
+    name: "CD – Update Helm image tag"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout application repo (for version file)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Resolve the semver tag that CI just created ──────────────────────
+      - name: Get latest git tag (semver)
+        id: get_tag
+        run: |
+          git fetch --tags
+          TAG=$(git describe --tags --abbrev=0)
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Resolved image tag: ${TAG}"
+
+      # ── Generate GitHub App Token ────────────────────────────────────────
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: "k8s-manifests"
+
+      # ── Checkout the manifest/helm repository ────────────────────────────
+      - name: Checkout manifest repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.MANIFEST_REPO }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: manifest-repo
+
+      # ── Patch values.yaml with the new image tag ─────────────────────────
+      - name: Update image tag in values.yaml
+        run: |
+          TAG=${{ steps.get_tag.outputs.tag }}
+          VALUES_FILE="manifest-repo/charts/${{ inputs.service-name }}/values.yaml"
+
+          yq e ".image.tag = \"${TAG}\"" -i "${VALUES_FILE}"
+
+          echo "Updated image.tag to ${TAG} in ${VALUES_FILE}"
+          cat "${VALUES_FILE}"
+
+      # ── Commit & push the tag bump ────────────────────────────────────────
+      - name: Commit and push to manifest repo
+        run: |
+          TAG=${{ steps.get_tag.outputs.tag }}
+
+          cd manifest-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add charts/${{ inputs.service-name }}/values.yaml
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+
+          git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG} [skip ci]"
+          git push
