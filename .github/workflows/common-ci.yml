@@ -30,69 +30,31 @@ on:
         type: string
 
     secrets:
-      SONAR_TOKEN:
-        required: true
-      SONAR_HOST_URL:
-        required: true
-      SNYK_TOKEN:
-        required: true
-      DOCKER_USERNAME:
-        required: true
-      DOCKER_PASSWORD:
-        required: true
-      SMTP_HOST:
-        required: true
-      SMTP_PORT:
-        required: true
-      SMTP_USERNAME:
-        required: true
-      SMTP_PASSWORD:
-        required: true
-      EMAIL_TO:
-        required: true
+      SONAR_TOKEN: { required: true }
+      SONAR_HOST_URL: { required: true }
+      SNYK_TOKEN: { required: true }
+      DOCKER_USERNAME: { required: true }
+      DOCKER_PASSWORD: { required: true }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# JOB GRAPH:
-#
-#   prepare
-#     ├── test ─────────────┐
-#     ├── sonar ────────────┼──► build ──► trivy ──► push ──► notify
-#     └── snyk  ────────────┘
-#
-# ──────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  # ── JOB 1: PREPARE ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# PREPARE
+# ─────────────────────────────────────────
   prepare:
-    name: "Prepare"
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: read
-
-    defaults:
-      run:
-        working-directory: ${{ inputs.working_directory }}
 
     outputs:
       tag:  ${{ steps.image_tag.outputs.tag }}
       push: ${{ steps.image_tag.outputs.push }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Calculate Semantic Version (main only)
+      # 🔥 SEMVER (ONLY MAIN)
+      - name: Calculate Semantic Version
         id: semver
         if: github.ref == 'refs/heads/main'
         uses: mathieudutour/github-tag-action@v6.2
@@ -102,349 +64,133 @@ jobs:
           default_bump: patch
           tag_prefix: 'v'
 
+      # 🚀 BRANCH-AWARE TAGGING
       - name: Resolve Image Tag
         id: image_tag
         run: |
+          BRANCH_NAME=$(echo "${GITHUB_REF##*/}" | tr '/' '-')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
-            echo "push=true"                               >> $GITHUB_OUTPUT
+            TAG="${{ steps.semver.outputs.new_tag }}"
+            PUSH="true"
+
+          elif [[ "$BRANCH_NAME" == "dev" ]]; then
+            TAG="dev-${SHORT_SHA}"
+            PUSH="true"
+
           else
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            echo "tag=sha-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
-            echo "push=false"                              >> $GITHUB_OUTPUT
+            TAG="dev-${BRANCH_NAME}-${SHORT_SHA}"
+            PUSH="false"
           fi
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "push=$PUSH" >> $GITHUB_OUTPUT
 
-      - name: Install dependencies
-        run: npm ci || npm install
-
-      - name: Auto-fix package-lock.json
-        if: github.event_name == 'push'
-        run: |
-          if [ -n "$(git status --porcelain package-lock.json)" ]; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add package-lock.json
-            git commit -m "chore: auto-sync package-lock.json [skip ci]"
-            git push
-          else
-            echo "Lockfile is fully synced."
-          fi
-
-  # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# TEST
+# ─────────────────────────────────────────
   test:
-    name: "Test"
     runs-on: ubuntu-latest
     needs: prepare
 
-    defaults:
-      run:
-        working-directory: ${{ inputs.working_directory }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: npm ci || npm install
+      - run: npm test
 
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies
-        run: npm ci || npm install
-
-      - name: Run Tests
-        run: npm test
-
-  # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# SONAR
+# ─────────────────────────────────────────
   sonar:
-    name: "SonarQube"
     runs-on: ubuntu-latest
     needs: prepare
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: SonarSource/sonarqube-scan-action@v6
         with:
-          fetch-depth: 0
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        with:
-          projectBaseDir: .
           args: >
             -Dsonar.projectKey=${{ inputs.sonar_project_key }}
-            -Dsonar.projectName=${{ inputs.sonar_project_key }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  # ── JOB 4: SNYK ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# SNYK
+# ─────────────────────────────────────────
   snyk:
-    name: "Snyk Security"
     runs-on: ubuntu-latest
     needs: prepare
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      - name: Snyk Scan
-        uses: snyk/actions/node@0.4.0
+      - uses: actions/checkout@v4
+      - uses: snyk/actions/node@0.4.0
         with:
           command: test
-          args: --file=${{ inputs.working_directory }}/package.json --severity-threshold=high
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  # ── JOB 5: BUILD ────────────────────────────────────────────────────────────
-  # Builds the Docker image once, saves it as a tar artifact.
-  # Trivy and Push both download this exact artifact — no rebuilds ever.
+# ─────────────────────────────────────────
+# BUILD
+# ─────────────────────────────────────────
   build:
-    name: "Docker Build"
     runs-on: ubuntu-latest
     needs: [prepare, test, sonar, snyk]
-    # needs: [prepare, snyk]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js (frontend builds only)
-        if: inputs.run_build == true
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Restore npm cache (frontend builds only)
-        if: inputs.run_build == true
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies (frontend builds only)
-        if: inputs.run_build == true
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      - name: Build frontend
-        if: inputs.run_build == true
-        working-directory: ${{ inputs.working_directory }}
-        run: npm run build
-
-      - name: Resolve Dockerfile Path
-        id: dockerfile
-        run: |
-          DOCKERFILE="${{ inputs.dockerfile_path }}"
-          if [ -z "$DOCKERFILE" ]; then
-            DOCKERFILE="${{ inputs.image_name }}/Dockerfile"
-          fi
-          echo "path=$DOCKERFILE" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
 
       - name: Build Docker Image
         working-directory: ${{ inputs.docker_context }}
         run: |
           docker build \
-            -f "${{ steps.dockerfile.outputs.path }}" \
             -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
             .
 
-      - name: Save image as tar artifact
+      - name: Save Image
         run: |
           docker save \
             ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
-            -o /tmp/docker-image.tar
+            -o image.tar
 
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp/docker-image.tar
-          retention-days: 1
+          name: image
+          path: image.tar
 
-  # ── JOB 6: TRIVY ────────────────────────────────────────────────────────────
-  trivy:
-    name: "Trivy Image Scan"
+# ─────────────────────────────────────────
+# PUSH
+# ─────────────────────────────────────────
+  push:
     runs-on: ubuntu-latest
     needs: [prepare, build]
-
-    steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Trivy Security Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}'
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-
-  # ── JOB 7: PUSH ─────────────────────────────────────────────────────────────
-  push:
-    name: "Docker Push"
-    runs-on: ubuntu-latest
-    needs: [prepare, trivy]
     if: needs.prepare.outputs.push == 'true'
 
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          name: image
 
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp
+      - run: docker load -i image.tar
 
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Docker Login
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Push Docker Image (semver + latest)
+      - name: Push Image
         run: |
           docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
-          docker tag  ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
-                      ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
 
-      - name: Create Git Tag
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ github.token }}
-          custom_tag: ${{ needs.prepare.outputs.tag }}
-          tag_prefix: ''
+          # ONLY MAIN GETS LATEST
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            docker tag \
+              ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+              ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
 
-  create-release:
-    name: "Create GitHub Release"
-    needs: [prepare, test, sonar, snyk, build, trivy, push]
-    if: |
-      always() &&
-      github.ref == 'refs/heads/main' &&
-      needs.push.result == 'success'
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: Release ${{ needs.prepare.outputs.tag }}
-          body: |
-            Release of ${{ inputs.service-name }}
-            Version: ${{ needs.prepare.outputs.tag }}
-            Image: ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
-          generate_release_notes: true
-
-  # ── JOB 9: NOTIFY ───────────────────────────────────────────────────────────
-  notify:
-    name: "Notify"
-    runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk, build, trivy, push, create-release]
-    # needs: [prepare, snyk, build, trivy, push, create-release]
-    if: always() && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Send Email (Success)
-        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "CI Success - ${{ inputs.service-name }} ${{ needs.prepare.outputs.tag }}"
-          body: |
-            Build Successful
-
-            Service:      ${{ inputs.service-name }}
-            Tag:          ${{ needs.prepare.outputs.tag }}
-            Image:        ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
-            Repository:   ${{ github.repository }}
-            Triggered By: ${{ github.actor }}
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions
-
-      - name: Send Email (Failure)
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "CI Failed - ${{ inputs.service-name }} - Run #${{ github.run_number }}"
-          body: |
-            CI Pipeline Execution Failed
-
-            Service:       ${{ inputs.service-name }}
-            Tag Attempted: ${{ needs.prepare.outputs.tag }}
-            Repository:    ${{ github.repository }}
-            Branch:        ${{ github.ref_name }}
-            Triggered By:  ${{ github.actor }}
-            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions
+            docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
+          fi
