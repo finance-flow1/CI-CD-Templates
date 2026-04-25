@@ -6,6 +6,11 @@ on:
       service-name:
         required: true
         type: string
+        description: "Docker image / repo name (e.g. financeflow-userservice) — used in commit messages"
+      helm-chart-key:
+        required: true
+        type: string
+        description: "Key in environments/<env>/values.yaml to patch (e.g. user-service, frontend)"
       ci-workflow-name:
         required: true
         type: string
@@ -139,13 +144,15 @@ jobs:
         run: |
           TAG="${{ needs.resolve-env.outputs.tag }}"
           ENV="${{ needs.resolve-env.outputs.env }}"
-          SERVICE="${{ inputs.service-name }}"
+          HELM_KEY="${{ inputs.helm-chart-key }}"
           VALUES_FILE="manifest-repo/environments/${ENV}/values.yaml"
 
-          SERVICE_NAME="${SERVICE}" NEW_TAG="${TAG}" \
-            yq e '.[env(SERVICE_NAME)].image.tag = env(NEW_TAG)' -i "${VALUES_FILE}"
+          # HELM_KEY is the exact top-level key in values.yaml (e.g. "user-service")
+          # service-name is the Docker image name (e.g. "financeflow-userservice") — NOT used here
+          HELM_KEY_NAME="${HELM_KEY}" NEW_TAG="${TAG}" \
+            yq e '.[env(HELM_KEY_NAME)].image.tag = env(NEW_TAG)' -i "${VALUES_FILE}"
 
-          echo "✅ Updated ${SERVICE}.image.tag → ${TAG} in ${VALUES_FILE}"
+          echo "✅ Updated ${HELM_KEY}.image.tag → ${TAG} in ${VALUES_FILE}"
           cat "${VALUES_FILE}"
 
       # ── Commit & push the tag bump ─────────────────────────────────────────
