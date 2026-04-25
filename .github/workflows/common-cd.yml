@@ -19,13 +19,26 @@ on:
       MANIFEST_REPO:
         required: true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 – Resolve the target environment and image tag from the CI run context
+# Job 2 – Manual gate: pauses for a reviewer ONLY when deploying to prod
+#          (configure required reviewers in: repo Settings → Environments → production)
+# Job 3 – Patches the Helm values file and pushes the tag bump commit
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
-  update-manifest:
-    name: "CD – Update Helm image tag"
+
+  # ── Job 1: Resolve ENV + TAG ───────────────────────────────────────────────
+  resolve-env:
+    name: "CD – Resolve environment"
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
+    # Only proceed when the upstream CI workflow actually succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      env: ${{ steps.resolve.outputs.env }}
 
     steps:
       - name: Checkout application repo (for git tag)
@@ -33,27 +46,66 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── Determine target environment based on branch ─────────────────────
-      - name: Resolve environment target
+      # main branch  →  ENV=prod  │  TAG = semver (e.g. v1.2.3) created by CI
+      # any other    →  ENV=dev   │  TAG = dev-<branch>-<sha7>  (matches CI tag)
+      - name: Resolve environment and image tag
         id: resolve
         run: |
-          if [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
-            # Prod: fetch the semver tag that was just created by CI
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          SHA="${{ github.event.workflow_run.head_sha }}"
+
+          if [[ "${BRANCH}" == "main" ]]; then
             git fetch --tags
             TAG=$(git describe --tags --abbrev=0)
             ENV="prod"
           else
-            # Dev: build the same dev tag string CI would have computed
-            BRANCH="${{ github.event.workflow_run.head_branch }}"
-            SHA="${{ github.event.workflow_run.head_sha }}"
             TAG="dev-${BRANCH}-${SHA:0:7}"
             ENV="dev"
           fi
-          echo "tag=${TAG}"   >> $GITHUB_OUTPUT
-          echo "env=${ENV}"   >> $GITHUB_OUTPUT
-          echo "Resolved tag: ${TAG}, environment: ${ENV}"
 
-      # ── Generate GitHub App Token ────────────────────────────────────────
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "env=${ENV}" >> $GITHUB_OUTPUT
+          echo "Resolved → service=${{ inputs.service-name }}  tag=${TAG}  env=${ENV}"
+
+  # ── Job 2: Manual gate — prod only ────────────────────────────────────────
+  await-approval:
+    name: "CD – Await production approval"
+    needs: resolve-env
+
+    # Skipped entirely for dev — only blocks on prod deploys
+    if: needs.resolve-env.outputs.env == 'prod'
+
+    runs-on: ubuntu-latest
+
+    # Targets the 'production' GitHub environment.
+    # Go to: repo Settings → Environments → production → Required reviewers
+    # GitHub will pause here and notify reviewers before proceeding.
+    environment: production
+
+    steps:
+      - name: Approval granted
+        run: echo "✅ Production deployment approved — proceeding to update manifests."
+
+  # ── Job 3: Patch Helm values and push ─────────────────────────────────────
+  update-manifest:
+    name: "CD – Update Helm image tag"
+    needs: [resolve-env, await-approval]
+
+    # Run when:
+    #   • resolve succeeded, AND
+    #   • approval succeeded (prod) OR approval was skipped (dev)
+    if: |
+      always() &&
+      needs.resolve-env.result == 'success' &&
+      (needs.await-approval.result == 'success' || needs.await-approval.result == 'skipped')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      # ── Generate GitHub App Token ──────────────────────────────────────────
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -63,7 +115,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: "k8s-manifests"
 
-      # ── Checkout the manifest/helm repository ────────────────────────────
+      # ── Checkout the k8s-manifests (Helm) repository ──────────────────────
       - name: Checkout manifest repo
         uses: actions/checkout@v4
         with:
@@ -71,39 +123,52 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: manifest-repo
 
-      # ── Install yq ───────────────────────────────────────────────────────
+      # ── Install yq ────────────────────────────────────────────────────────
       - name: Install yq
         run: |
           sudo wget -qO /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      # ── Patch umbrella values file with the new image tag ─────────────────
+      # ── Patch the umbrella values file ────────────────────────────────────
+      #   dev  push  →  environments/dev/values.yaml  →  <service>.image.tag
+      #   main push  →  environments/prod/values.yaml →  <service>.image.tag
+      #
+      #   Uses yq env() to safely handle hyphenated keys (user-service, etc.)
       - name: Update image tag in umbrella values
         run: |
-          TAG="${{ steps.resolve.outputs.tag }}"
-          ENV="${{ steps.resolve.outputs.env }}"
-          VALUES_FILE="manifest-repo/environments/${ENV}/values.yaml"
+          TAG="${{ needs.resolve-env.outputs.tag }}"
+          ENV="${{ needs.resolve-env.outputs.env }}"
           SERVICE="${{ inputs.service-name }}"
+          VALUES_FILE="manifest-repo/environments/${ENV}/values.yaml"
 
-          yq e ".["\"${SERVICE}\""].image.tag = \"${TAG}\"" -i "${VALUES_FILE}"
+          SERVICE_NAME="${SERVICE}" NEW_TAG="${TAG}" \
+            yq e '.[env(SERVICE_NAME)].image.tag = env(NEW_TAG)' -i "${VALUES_FILE}"
 
-          echo "Updated ${SERVICE}.image.tag to ${TAG} in ${VALUES_FILE}"
+          echo "✅ Updated ${SERVICE}.image.tag → ${TAG} in ${VALUES_FILE}"
           cat "${VALUES_FILE}"
 
-      # ── Commit & push the tag bump ────────────────────────────────────────
+      # ── Commit & push the tag bump ─────────────────────────────────────────
       - name: Commit and push to manifest repo
         run: |
-          TAG="${{ steps.resolve.outputs.tag }}"
-          ENV="${{ steps.resolve.outputs.env }}"
+          TAG="${{ needs.resolve-env.outputs.tag }}"
+          ENV="${{ needs.resolve-env.outputs.env }}"
           BRANCH="${{ github.event.workflow_run.head_branch }}"
+          SERVICE="${{ inputs.service-name }}"
 
           cd manifest-repo
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add environments/${ENV}/values.yaml
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git add "environments/${ENV}/values.yaml"
 
-          git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG} [${BRANCH}] [skip ci]"
+          if git diff --cached --quiet; then
+            echo "No changes to commit — tag already up to date."
+            exit 0
+          fi
+
+          git commit -m "chore(${SERVICE}): bump ${ENV} image tag to ${TAG} [${BRANCH}] [skip ci]"
+
+          # Pull --rebase in case another service pushed concurrently, then push
+          git pull --rebase origin HEAD
           git push
