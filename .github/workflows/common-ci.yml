@@ -28,6 +28,10 @@ on:
       service-name:
         required: true
         type: string
+      docker_build_args:
+        required: false
+        type: string
+        default: ''
 
     secrets:
       SONAR_TOKEN:
@@ -264,8 +268,13 @@ jobs:
       - name: Build Docker Image
         working-directory: ${{ inputs.docker_context }}
         run: |
+          BUILD_ARGS=""
+          if [ -n "${{ inputs.docker_build_args }}" ]; then
+            BUILD_ARGS="--build-arg ${{ inputs.docker_build_args }}"
+          fi
           docker build \
             -f "${{ inputs.dockerfile_path }}" \
+            $BUILD_ARGS \
             -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
             .
 
