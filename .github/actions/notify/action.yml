@@ -1,0 +1,92 @@
+name: 'CI – Notify'
+description: 'Send a success or failure email notification. Fires on every branch.'
+
+inputs:
+  service_name:
+    description: 'Service name'
+    required: true
+  image_tag:
+    description: 'Docker image tag attempted'
+    required: true
+  docker_username:
+    description: 'DockerHub username'
+    required: true
+  pipeline_status:
+    description: 'Overall pipeline status: "success" or "failure"'
+    required: true
+  branch:
+    description: 'Branch that triggered the pipeline'
+    required: true
+  actor:
+    description: 'GitHub user who triggered the run'
+    required: true
+  repository:
+    description: 'GitHub repository (owner/repo)'
+    required: true
+  run_url:
+    description: 'Full URL to the GitHub Actions run'
+    required: true
+  run_number:
+    description: 'GitHub Actions run number'
+    required: true
+  smtp_host:
+    description: 'SMTP server host'
+    required: true
+  smtp_port:
+    description: 'SMTP server port'
+    required: true
+  smtp_username:
+    description: 'SMTP username'
+    required: true
+  smtp_password:
+    description: 'SMTP password'
+    required: true
+  email_to:
+    description: 'Recipient email address'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send Success Email
+      if: inputs.pipeline_status == 'success' && inputs.branch == 'main'
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ inputs.smtp_host }}
+        server_port: ${{ inputs.smtp_port }}
+        username: ${{ inputs.smtp_username }}
+        password: ${{ inputs.smtp_password }}
+        subject: '✅ CI Success — ${{ inputs.service_name }} ${{ inputs.image_tag }} [${{ inputs.branch }}]'
+        body: |
+          ✅ CI Pipeline Succeeded
+
+          Service:      ${{ inputs.service_name }}
+          Branch:       ${{ inputs.branch }}
+          Tag:          ${{ inputs.image_tag }}
+          Image:        ${{ inputs.docker_username }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+          Repository:   ${{ inputs.repository }}
+          Triggered By: ${{ inputs.actor }}
+          Run URL:      ${{ inputs.run_url }}
+        to: ${{ inputs.email_to }}
+        from: GitHub Actions <noreply@github.com>
+
+    - name: Send Failure Email
+      if: inputs.pipeline_status != 'success'
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ inputs.smtp_host }}
+        server_port: ${{ inputs.smtp_port }}
+        username: ${{ inputs.smtp_username }}
+        password: ${{ inputs.smtp_password }}
+        subject: '❌ CI Failed — ${{ inputs.service_name }} — Run #${{ inputs.run_number }} [${{ inputs.branch }}]'
+        body: |
+          ❌ CI Pipeline Failed
+
+          Service:       ${{ inputs.service_name }}
+          Branch:        ${{ inputs.branch }}
+          Tag Attempted: ${{ inputs.image_tag }}
+          Repository:    ${{ inputs.repository }}
+          Triggered By:  ${{ inputs.actor }}
+          Logs:          ${{ inputs.run_url }}
+        to: ${{ inputs.email_to }}
+        from: GitHub Actions <noreply@github.com>

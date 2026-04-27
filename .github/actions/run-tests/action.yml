@@ -1,0 +1,36 @@
+name: 'CI – Run Tests'
+description: 'Install Node dependencies and run the test suite'
+
+inputs:
+  working_directory:
+    description: 'Path to the service root'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Restore npm cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-npm-
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: npm ci || npm install
+
+    - name: Run Tests
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: npm test

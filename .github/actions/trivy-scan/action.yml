@@ -1,0 +1,35 @@
+name: 'CI – Trivy Image Scan'
+description: 'Download Docker image artifact and run Trivy vulnerability scan'
+
+inputs:
+  service_name:
+    description: 'Service / Docker image name'
+    required: true
+  image_tag:
+    description: 'Docker image tag to scan'
+    required: true
+  docker_username:
+    description: 'DockerHub username'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download image artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: docker-image-${{ inputs.service_name }}
+        path: /tmp
+
+    - name: Load Docker image
+      shell: bash
+      run: docker load -i /tmp/docker-image.tar
+
+    - name: Trivy Security Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '${{ inputs.docker_username }}/${{ inputs.service_name }}:${{ inputs.image_tag }}'
+        format: table
+        exit-code: '1'
+        ignore-unfixed: true
+        severity: HIGH,CRITICAL

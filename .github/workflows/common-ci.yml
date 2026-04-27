@@ -56,265 +56,103 @@ on:
         required: true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# JOB GRAPH:
+# JOB GRAPH  (each job delegates its steps to a composite action)
 #
 #   prepare
 #     ├── test ─────────────┐
 #     ├── sonar ────────────┼──► build ──► trivy ──► push ──► release ──► notify
 #     └── snyk  ────────────┘
 #
+# notify runs on ALL branches and ALL outcomes (always())
 # ──────────────────────────────────────────────────────────────────────────────
+
 jobs:
 
   # ── JOB 1: PREPARE ──────────────────────────────────────────────────────────
   prepare:
     name: "Prepare"
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
       packages: read
-
     outputs:
-      tag:  ${{ steps.image_tag.outputs.tag }}
-      push: ${{ steps.image_tag.outputs.push }}
-
+      tag:  ${{ steps.prepare.outputs.tag }}
+      push: ${{ steps.prepare.outputs.push }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Run Prepare Action
+        id: prepare
+        uses: finance-flow1/CI-CD-Templates/.github/actions/prepare@main
         with:
-          fetch-depth: 0
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Calculate Semantic Version (main only)
-        id: semver
-        if: github.ref == 'refs/heads/main'
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
+          working_directory: ${{ inputs.working_directory }}
           github_token: ${{ github.token }}
-          dry_run: true
-          default_bump: patch
-          tag_prefix: 'v'
-
-      - name: Resolve Image Tag
-        id: image_tag
-        run: |
-          BRANCH_NAME=$(echo "${GITHUB_REF##*/}" | tr '/' '-')
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          else
-            echo "tag=dev-${BRANCH_NAME}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      # Auto-fix package-lock.json disabled — commit lockfile manually before pushing
 
   # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
   test:
     name: "Test"
     runs-on: ubuntu-latest
     needs: prepare
-
-    defaults:
-      run:
-        working-directory: ${{ inputs.working_directory }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies
-        run: npm ci || npm install
-
       - name: Run Tests
-        run: npm test
+        uses: finance-flow1/CI-CD-Templates/.github/actions/run-tests@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
 
   # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
   sonar:
     name: "SonarQube"
     runs-on: ubuntu-latest
     needs: prepare
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Run SonarQube Scan
+        uses: finance-flow1/CI-CD-Templates/.github/actions/sonar-scan@main
         with:
-          fetch-depth: 0
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        with:
-          projectBaseDir: ${{ inputs.working_directory }}
-          args: >
-            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
-            -Dsonar.projectName=${{ inputs.sonar_project_key }}
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          working_directory: ${{ inputs.working_directory }}
+          sonar_project_key: ${{ inputs.sonar_project_key }}
+          sonar_token: ${{ secrets.SONAR_TOKEN }}
+          sonar_host_url: ${{ secrets.SONAR_HOST_URL }}
 
   # ── JOB 4: SNYK ─────────────────────────────────────────────────────────────
   snyk:
     name: "Snyk Security"
     runs-on: ubuntu-latest
     needs: prepare
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Run Snyk Scan
+        uses: finance-flow1/CI-CD-Templates/.github/actions/snyk-scan@main
         with:
-          node-version: '20'
-
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      - name: Snyk Scan
-        uses: snyk/actions/node@0.4.0
-        with:
-          command: test
-          args: --file=${{ inputs.working_directory }}/package.json --severity-threshold=high
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          working_directory: ${{ inputs.working_directory }}
+          snyk_token: ${{ secrets.SNYK_TOKEN }}
 
   # ── JOB 5: BUILD ────────────────────────────────────────────────────────────
   build:
     name: "Docker Build"
     runs-on: ubuntu-latest
     needs: [prepare, test, sonar, snyk]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js (frontend builds only)
-        if: inputs.run_build == true
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Restore npm cache (frontend builds only)
-        if: inputs.run_build == true
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies (frontend builds only)
-        if: inputs.run_build == true
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      - name: Build frontend
-        if: inputs.run_build == true
-        working-directory: ${{ inputs.working_directory }}
-        run: npm run build
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Build Docker Image
-        working-directory: ${{ inputs.docker_context }}
-        run: |
-          BUILD_ARGS=""
-          if [ -n "${{ inputs.docker_build_args }}" ]; then
-            BUILD_ARGS="--build-arg ${{ inputs.docker_build_args }}"
-          fi
-          docker build \
-            -f "${{ inputs.dockerfile_path }}" \
-            $BUILD_ARGS \
-            -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
-            .
-
-      - name: Save image as tar artifact
-        run: |
-          docker save \
-            ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
-            -o /tmp/docker-image.tar
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+        uses: finance-flow1/CI-CD-Templates/.github/actions/docker-build@main
         with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp/docker-image.tar
-          retention-days: 1
+          working_directory: ${{ inputs.working_directory }}
+          docker_context: ${{ inputs.docker_context }}
+          dockerfile_path: ${{ inputs.dockerfile_path }}
+          run_build: ${{ inputs.run_build }}
+          docker_build_args: ${{ inputs.docker_build_args }}
+          service_name: ${{ inputs.service-name }}
+          image_tag: ${{ needs.prepare.outputs.tag }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
 
   # ── JOB 6: TRIVY ────────────────────────────────────────────────────────────
   trivy:
     name: "Trivy Image Scan"
     runs-on: ubuntu-latest
     needs: [prepare, build]
-
     steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - name: Run Trivy Scan
+        uses: finance-flow1/CI-CD-Templates/.github/actions/trivy-scan@main
         with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Trivy Security Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}'
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
+          service_name: ${{ inputs.service-name }}
+          image_tag: ${{ needs.prepare.outputs.tag }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
 
   # ── JOB 7: PUSH ─────────────────────────────────────────────────────────────
   push:
@@ -322,49 +160,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, trivy]
     if: needs.prepare.outputs.push == 'true'
-
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Push Docker Image
+        uses: finance-flow1/CI-CD-Templates/.github/actions/docker-push@main
         with:
-          fetch-depth: 0
-
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Docker Login
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Push Docker Image (semver + latest)
-        run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
-
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            docker tag \
-              ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
-              ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
-            docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
-          fi
-
-      - name: Create Git Tag (main only)
-        if: github.ref == 'refs/heads/main'
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
+          service_name: ${{ inputs.service-name }}
+          image_tag: ${{ needs.prepare.outputs.tag }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
+          docker_password: ${{ secrets.DOCKER_PASSWORD }}
           github_token: ${{ github.token }}
-          custom_tag: ${{ needs.prepare.outputs.tag }}
-          tag_prefix: ''
 
   # ── JOB 8: RELEASE ──────────────────────────────────────────────────────────
   release:
@@ -372,73 +178,51 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, push]
     if: github.ref == 'refs/heads/main' && needs.push.result == 'success'
-
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: finance-flow1/CI-CD-Templates/.github/actions/github-release@main
         with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: "Release ${{ needs.prepare.outputs.tag }}"
-          body: |
-            ## ${{ inputs.service-name }} — ${{ needs.prepare.outputs.tag }}
-
-            **Docker Image:** `${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}`
-            **Repository:** ${{ github.repository }}
-            **Triggered by:** ${{ github.actor }}
-          generate_release_notes: true
+          service_name: ${{ inputs.service-name }}
+          image_tag: ${{ needs.prepare.outputs.tag }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
+          actor: ${{ github.actor }}
+          repository: ${{ github.repository }}
 
   # ── JOB 9: NOTIFY ───────────────────────────────────────────────────────────
+  # Fires on ALL branches and ALL outcomes (success AND failure)
   notify:
     name: "Notify"
     runs-on: ubuntu-latest
     needs: [prepare, test, sonar, snyk, build, trivy, push, release]
-    if: always() && github.ref == 'refs/heads/main'
-
+    if: always()
     steps:
-      - name: Send Email (Success)
-        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
-        uses: dawidd6/action-send-mail@v3
+      - name: Resolve pipeline status
+        id: status
+        shell: bash
+        run: |
+          RESULTS="${{ join(needs.*.result, ',') }}"
+          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+            echo "value=failure" >> $GITHUB_OUTPUT
+          else
+            echo "value=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Notification Email
+        uses: finance-flow1/CI-CD-Templates/.github/actions/notify@main
         with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ CI Success — ${{ inputs.service-name }} ${{ needs.prepare.outputs.tag }}"
-          body: |
-            Build Successful
-
-            Service:      ${{ inputs.service-name }}
-            Tag:          ${{ needs.prepare.outputs.tag }}
-            Image:        ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
-            Repository:   ${{ github.repository }}
-            Triggered By: ${{ github.actor }}
-            Run URL:      ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions <noreply@github.com>
-
-      - name: Send Email (Failure)
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ CI Failed — ${{ inputs.service-name }} — Run #${{ github.run_number }}"
-          body: |
-            CI Pipeline Execution Failed
-
-            Service:       ${{ inputs.service-name }}
-            Tag Attempted: ${{ needs.prepare.outputs.tag }}
-            Repository:    ${{ github.repository }}
-            Branch:        ${{ github.ref_name }}
-            Triggered By:  ${{ github.actor }}
-            Logs:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions <noreply@github.com>
+          service_name: ${{ inputs.service-name }}
+          image_tag: ${{ needs.prepare.outputs.tag }}
+          docker_username: ${{ secrets.DOCKER_USERNAME }}
+          pipeline_status: ${{ steps.status.outputs.value }}
+          branch: ${{ github.ref_name }}
+          actor: ${{ github.actor }}
+          repository: ${{ github.repository }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          run_number: ${{ github.run_number }}
+          smtp_host: ${{ secrets.SMTP_HOST }}
+          smtp_port: ${{ secrets.SMTP_PORT }}
+          smtp_username: ${{ secrets.SMTP_USERNAME }}
+          smtp_password: ${{ secrets.SMTP_PASSWORD }}
+          email_to: ${{ secrets.EMAIL_TO }}

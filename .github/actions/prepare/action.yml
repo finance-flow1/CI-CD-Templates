@@ -1,0 +1,68 @@
+name: 'CI – Prepare'
+description: 'Checkout, resolve semantic version tag, and install Node dependencies'
+
+inputs:
+  working_directory:
+    description: 'Path to the service root (e.g. .)'
+    required: true
+  github_token:
+    description: 'GitHub token for semver tag calculation'
+    required: true
+
+outputs:
+  tag:
+    description: 'Resolved Docker image tag'
+    value: ${{ steps.image_tag.outputs.tag }}
+  push:
+    description: 'Whether this build should be pushed'
+    value: ${{ steps.image_tag.outputs.push }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Cache npm
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-npm-
+
+    - name: Calculate Semantic Version (main only)
+      id: semver
+      if: github.ref == 'refs/heads/main'
+      uses: mathieudutour/github-tag-action@v6.2
+      with:
+        github_token: ${{ inputs.github_token }}
+        dry_run: true
+        default_bump: patch
+        tag_prefix: 'v'
+
+    - name: Resolve Image Tag
+      id: image_tag
+      shell: bash
+      run: |
+        BRANCH_NAME=$(echo "${GITHUB_REF##*/}" | tr '/' '-')
+        SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
+          echo "push=true" >> $GITHUB_OUTPUT
+        else
+          echo "tag=dev-${BRANCH_NAME}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "push=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: npm ci || npm install

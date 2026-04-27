@@ -1,0 +1,43 @@
+name: 'CI – SonarQube Scan'
+description: 'Run SonarQube SAST scan and enforce the quality gate'
+
+inputs:
+  working_directory:
+    description: 'Project base directory for SonarQube'
+    required: true
+  sonar_project_key:
+    description: 'SonarQube project key'
+    required: true
+  sonar_token:
+    description: 'SonarQube authentication token'
+    required: true
+  sonar_host_url:
+    description: 'SonarQube server URL'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: SonarQube Scan
+      uses: SonarSource/sonarqube-scan-action@v6
+      with:
+        projectBaseDir: ${{ inputs.working_directory }}
+        args: >
+          -Dsonar.projectKey=${{ inputs.sonar_project_key }}
+          -Dsonar.projectName=${{ inputs.sonar_project_key }}
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar_token }}
+        SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+
+    - name: SonarQube Quality Gate
+      uses: SonarSource/sonarqube-quality-gate-action@v1
+      with:
+        scanMetadataReportFile: .scannerwork/report-task.txt
+      timeout-minutes: 5
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar_token }}

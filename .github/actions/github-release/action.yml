@@ -1,0 +1,38 @@
+name: 'CI – GitHub Release'
+description: 'Create a GitHub Release for the given semver tag (main branch only)'
+
+inputs:
+  service_name:
+    description: 'Service name shown in the release notes'
+    required: true
+  image_tag:
+    description: 'Semver tag for the release'
+    required: true
+  docker_username:
+    description: 'DockerHub username'
+    required: true
+  actor:
+    description: 'GitHub actor who triggered the workflow'
+    required: true
+  repository:
+    description: 'GitHub repository (owner/repo)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ inputs.image_tag }}
+        name: 'Release ${{ inputs.image_tag }}'
+        body: |
+          ## ${{ inputs.service_name }} — ${{ inputs.image_tag }}
+
+          **Docker Image:** `${{ inputs.docker_username }}/${{ inputs.service_name }}:${{ inputs.image_tag }}`
+          **Repository:** ${{ inputs.repository }}
+          **Triggered by:** ${{ inputs.actor }}
+        generate_release_notes: true
